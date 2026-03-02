@@ -192,7 +192,7 @@ def create_vehicle_camera(R_stored, T_stored, fovx, fovy, width, height, cam_nam
         depth_mono=None,
         image_name=cam_name,
         uid=uid,
-        data_device="cuda"
+        data_device="cuda:0"
     )
     # Must set dimensions manually when image=None
     cam.image_width = width
