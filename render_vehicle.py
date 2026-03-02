@@ -238,7 +238,26 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
     z_vals = gs_xyz[:, 2]
     z_pct = np.percentile(z_vals, [5, 10, 25, 50, 75, 90, 95])
     print(f"[DEBUG] Point cloud Z percentiles (5,10,25,50,75,90,95): {z_pct}")
-    print(f"[DEBUG] Vehicle Z vs ground (Z_10th_pct): offset = {vehicle_lidar_in_world[2] - z_pct[1]:.1f}m")
+
+    # Estimate ground Z at vehicle's XY position
+    veh_xy = vehicle_lidar_in_world[:2]
+    xy_dists = np.linalg.norm(gs_xyz[:, :2] - veh_xy, axis=1)
+    for radius in [5, 10, 20, 50]:
+        nearby_mask = xy_dists < radius
+        n_nearby = nearby_mask.sum()
+        if n_nearby > 100:
+            nearby_z = gs_xyz[nearby_mask, 2]
+            # Ground is the densest Z layer - use histogram to find it
+            z_hist, z_edges = np.histogram(nearby_z, bins=50)
+            peak_bin = np.argmax(z_hist)
+            ground_z = (z_edges[peak_bin] + z_edges[peak_bin + 1]) / 2
+            z_90 = np.percentile(nearby_z, 90)
+            print(f"[DEBUG] Ground estimate (r={radius}m, n={n_nearby}): "
+                  f"peak_z={ground_z:.1f}, Z_90th={z_90:.1f}, "
+                  f"vehicle is {vehicle_lidar_in_world[2] - ground_z:.1f}m above peak")
+            break
+    else:
+        print(f"[DEBUG] Not enough nearby points to estimate ground Z")
 
     # Load COLMAP training cameras for reference
     colmap_images_txt = os.path.join(
