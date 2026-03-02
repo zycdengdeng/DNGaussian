@@ -27,6 +27,7 @@ from tqdm import tqdm
 from scipy.spatial.transform import Rotation
 
 from gaussian_renderer import render, GaussianModel
+from scene.colmap_loader import qvec2rotmat, read_extrinsics_text
 from arguments import ModelParams, PipelineParams, get_combined_args
 from utils.general_utils import safe_state
 from utils.graphics_utils import focal2fov, getProjectionMatrix
@@ -239,6 +240,24 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
     print(f"[DEBUG] Point cloud Z percentiles (5,10,25,50,75,90,95): {z_pct}")
     print(f"[DEBUG] Vehicle Z vs ground (Z_10th_pct): offset = {vehicle_lidar_in_world[2] - z_pct[1]:.1f}m")
 
+    # Load COLMAP training cameras for reference
+    colmap_images_txt = os.path.join(
+        source_path or os.path.join(model_path, "..", "..", "data", "car_road"),
+        "sparse", "0", "images.txt"
+    )
+    if os.path.exists(colmap_images_txt):
+        cam_extrinsics = read_extrinsics_text(colmap_images_txt)
+        print(f"\n[DEBUG] Training camera centers (from COLMAP images.txt):")
+        for img_id, extr in sorted(cam_extrinsics.items()):
+            R_w2c = qvec2rotmat(extr.qvec)
+            t_w2c = np.array(extr.tvec)
+            cam_center = -R_w2c.T @ t_w2c
+            print(f"  [{extr.name}] center={cam_center}")
+        print()
+    else:
+        print(f"\n[DEBUG] COLMAP images.txt not found at {colmap_images_txt}")
+        print(f"  Use --source_path to specify the data directory\n")
+
     # Create output directory
     vehicle_render_path = os.path.join(output_dir, "vehicle_renders")
     os.makedirs(vehicle_render_path, exist_ok=True)
@@ -394,4 +413,5 @@ if __name__ == "__main__":
         render_scale=args.render_scale,
         invert_extrinsics=args.invert_extrinsics,
         position_offset=offset,
+        source_path=args.source_path if args.source_path else None,
     )
