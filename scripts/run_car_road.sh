@@ -1,6 +1,10 @@
 dataset=$1
 workspace=$2
 export CUDA_VISIBLE_DEVICES=$3
+# Optional: vehicle calibration folder, transform JSON, and timestamp for vehicle rendering
+vehicle_calib=${4:-""}
+transform_json=${5:-""}
+timestamp=${6:-""}
 
 
 python train_llff.py  -s $dataset --model_path $workspace -r 1 --eval --n_sparse 3  --iterations 6000 --lambda_dssim 0.2 \
@@ -14,3 +18,13 @@ python train_llff.py  -s $dataset --model_path $workspace -r 1 --eval --n_sparse
 
 python render.py -s $dataset --model_path $workspace -r 1
 python metrics.py --model_path $workspace
+
+# Vehicle camera rendering (if calibration info provided)
+if [ -n "$vehicle_calib" ] && [ -n "$transform_json" ] && [ -n "$timestamp" ]; then
+    echo "Rendering vehicle camera viewpoints..."
+    python render_vehicle.py --model_path $workspace \
+        --vehicle_calib $vehicle_calib \
+        --transform_json $transform_json \
+        --timestamp $timestamp \
+        --render_scale 4
+fi
