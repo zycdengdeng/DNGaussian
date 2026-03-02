@@ -207,10 +207,37 @@ def create_vehicle_camera(R_stored, T_stored, fovx, fovy, width, height, cam_nam
     return cam
 
 
+def estimate_ground_z(gs_xyz, xy_position, search_radii=[5, 10, 20, 50], min_points=100):
+    """Estimate ground-level Z at a given XY position using Gaussian density.
+
+    Searches for the densest Z layer near the given XY position, which
+    corresponds to the road surface.
+
+    Returns:
+        ground_z (float or None): estimated ground Z, or None if insufficient data
+        info (dict): diagnostic information
+    """
+    xy_dists = np.linalg.norm(gs_xyz[:, :2] - xy_position[:2], axis=1)
+    for radius in search_radii:
+        nearby_mask = xy_dists < radius
+        n_nearby = nearby_mask.sum()
+        if n_nearby >= min_points:
+            nearby_z = gs_xyz[nearby_mask, 2]
+            z_hist, z_edges = np.histogram(nearby_z, bins=50)
+            peak_bin = np.argmax(z_hist)
+            ground_z = (z_edges[peak_bin] + z_edges[peak_bin + 1]) / 2
+            return ground_z, {
+                "radius": radius, "n_points": int(n_nearby),
+                "z_90th": float(np.percentile(nearby_z, 90)),
+            }
+    return None, {"radius": search_radii[-1], "n_points": 0}
+
+
 def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_ms,
                            camera_ids, pipeline, output_dir, render_scale=1,
                            source_path=None, invert_extrinsics=False,
-                           position_offset=None):
+                           position_offset=None, snap_to_ground=False,
+                           vehicle_height=1.5):
     """Main rendering function for vehicle camera viewpoints."""
     # Load trained model
     print(f"Loading model from {model_path}")
@@ -240,24 +267,28 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
     print(f"[DEBUG] Point cloud Z percentiles (5,10,25,50,75,90,95): {z_pct}")
 
     # Estimate ground Z at vehicle's XY position
-    veh_xy = vehicle_lidar_in_world[:2]
-    xy_dists = np.linalg.norm(gs_xyz[:, :2] - veh_xy, axis=1)
-    for radius in [5, 10, 20, 50]:
-        nearby_mask = xy_dists < radius
-        n_nearby = nearby_mask.sum()
-        if n_nearby > 100:
-            nearby_z = gs_xyz[nearby_mask, 2]
-            # Ground is the densest Z layer - use histogram to find it
-            z_hist, z_edges = np.histogram(nearby_z, bins=50)
-            peak_bin = np.argmax(z_hist)
-            ground_z = (z_edges[peak_bin] + z_edges[peak_bin + 1]) / 2
-            z_90 = np.percentile(nearby_z, 90)
-            print(f"[DEBUG] Ground estimate (r={radius}m, n={n_nearby}): "
-                  f"peak_z={ground_z:.1f}, Z_90th={z_90:.1f}, "
-                  f"vehicle is {vehicle_lidar_in_world[2] - ground_z:.1f}m above peak")
-            break
+    ground_z, ground_info = estimate_ground_z(gs_xyz, vehicle_lidar_in_world)
+    if ground_z is not None:
+        z_offset = vehicle_lidar_in_world[2] - ground_z
+        print(f"[DEBUG] Ground estimate (r={ground_info['radius']}m, "
+              f"n={ground_info['n_points']}): "
+              f"peak_z={ground_z:.1f}, Z_90th={ground_info['z_90th']:.1f}, "
+              f"vehicle is {z_offset:.1f}m above peak")
+        if snap_to_ground:
+            # Place vehicle at ground_z + vehicle_height (roof-mounted LiDAR)
+            snap_z_offset = ground_z + vehicle_height - vehicle_lidar_in_world[2]
+            print(f"[SNAP] Auto-adjusting Z by {snap_z_offset:.1f}m "
+                  f"(ground={ground_z:.1f} + height={vehicle_height:.1f} "
+                  f"- current={vehicle_lidar_in_world[2]:.1f})")
+            if position_offset is not None:
+                position_offset = [position_offset[0], position_offset[1],
+                                   position_offset[2] + snap_z_offset]
+            else:
+                position_offset = [0, 0, snap_z_offset]
     else:
         print(f"[DEBUG] Not enough nearby points to estimate ground Z")
+        if snap_to_ground:
+            print(f"[SNAP] WARNING: cannot snap - not enough nearby Gaussians")
 
     # Load COLMAP training cameras for reference
     colmap_images_txt = os.path.join(
@@ -412,6 +443,10 @@ if __name__ == "__main__":
                         help="Output directory (default: model_path)")
     parser.add_argument("--invert_extrinsics", action="store_true",
                         help="Invert vehicle cam2lidar extrinsics (use if YAML gives lidar2cam)")
+    parser.add_argument("--snap_to_ground", action="store_true",
+                        help="Auto-adjust vehicle Z to match road surface from point cloud")
+    parser.add_argument("--vehicle_height", type=float, default=1.5,
+                        help="Vehicle LiDAR height above ground in meters (default: 1.5)")
     parser.add_argument("--quiet", action="store_true")
 
     args = get_combined_args(parser)
@@ -432,5 +467,7 @@ if __name__ == "__main__":
         render_scale=args.render_scale,
         invert_extrinsics=args.invert_extrinsics,
         position_offset=offset,
+        snap_to_ground=args.snap_to_ground,
+        vehicle_height=args.vehicle_height,
         source_path=args.source_path if args.source_path else None,
     )
