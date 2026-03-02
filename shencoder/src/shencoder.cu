@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <optional>
 
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -397,7 +398,7 @@ void sh_encode_backward_cuda(const scalar_t *grad, const scalar_t *inputs, const
 }
 
 
-void sh_encode_forward(at::Tensor inputs, at::Tensor outputs, const uint32_t B, const uint32_t D, const uint32_t C, at::optional<at::Tensor> dy_dx) {
+void sh_encode_forward(at::Tensor inputs, at::Tensor outputs, const uint32_t B, const uint32_t D, const uint32_t C, std::optional<at::Tensor> dy_dx) {
     CHECK_CUDA(inputs);
     CHECK_CUDA(outputs);
     // CHECK_CUDA(dy_dx);
