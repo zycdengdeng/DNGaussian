@@ -19,7 +19,6 @@ import cv2
 import json
 import yaml
 import os
-import sys
 import math
 from pathlib import Path
 from argparse import ArgumentParser
@@ -27,10 +26,9 @@ from tqdm import tqdm
 from scipy.spatial.transform import Rotation
 
 from gaussian_renderer import render, GaussianModel
-from scene.colmap_loader import qvec2rotmat, read_extrinsics_text
 from arguments import ModelParams, PipelineParams, get_combined_args
 from utils.general_utils import safe_state
-from utils.graphics_utils import focal2fov, getProjectionMatrix
+from utils.graphics_utils import focal2fov
 from scene.cameras import Camera
 import torchvision
 
@@ -144,8 +142,7 @@ def compute_undistorted_intrinsics(K, D, cam_id, resolution):
     return new_K
 
 
-def compute_vehicle_cam_pose(R_w2l, t_w2l, R_cam2lidar, t_cam2lidar,
-                             position_offset=None):
+def compute_vehicle_cam_pose(R_w2l, t_w2l, R_cam2lidar, t_cam2lidar):
     """Compute vehicle camera pose in world (COLMAP/roadside) coordinates.
 
     Transform chain: Camera -> LiDAR -> World
@@ -153,7 +150,6 @@ def compute_vehicle_cam_pose(R_w2l, t_w2l, R_cam2lidar, t_cam2lidar,
     Args:
         R_w2l, t_w2l: world-to-lidar transform
         R_cam2lidar, t_cam2lidar: camera-to-lidar extrinsics
-        position_offset: optional [x, y, z] offset in world coordinates
 
     Returns:
         R_stored (3x3), T_stored (3,) for DNGaussian Camera class
@@ -171,10 +167,6 @@ def compute_vehicle_cam_pose(R_w2l, t_w2l, R_cam2lidar, t_cam2lidar,
     # Camera -> World = inv(World->LiDAR) @ Camera->LiDAR
     T_l2w = np.linalg.inv(T_w2l)
     T_c2w = T_l2w @ T_c2l
-
-    # Apply position offset (shift camera center in world coords)
-    if position_offset is not None:
-        T_c2w[:3, 3] += np.array(position_offset)
 
     # World -> Camera
     T_w2c = np.linalg.inv(T_c2w)
@@ -207,37 +199,8 @@ def create_vehicle_camera(R_stored, T_stored, fovx, fovy, width, height, cam_nam
     return cam
 
 
-def estimate_ground_z(gs_xyz, xy_position, search_radii=[5, 10, 20, 50], min_points=100):
-    """Estimate ground-level Z at a given XY position using Gaussian density.
-
-    Searches for the densest Z layer near the given XY position, which
-    corresponds to the road surface.
-
-    Returns:
-        ground_z (float or None): estimated ground Z, or None if insufficient data
-        info (dict): diagnostic information
-    """
-    xy_dists = np.linalg.norm(gs_xyz[:, :2] - xy_position[:2], axis=1)
-    for radius in search_radii:
-        nearby_mask = xy_dists < radius
-        n_nearby = nearby_mask.sum()
-        if n_nearby >= min_points:
-            nearby_z = gs_xyz[nearby_mask, 2]
-            z_hist, z_edges = np.histogram(nearby_z, bins=50)
-            peak_bin = np.argmax(z_hist)
-            ground_z = (z_edges[peak_bin] + z_edges[peak_bin + 1]) / 2
-            return ground_z, {
-                "radius": radius, "n_points": int(n_nearby),
-                "z_90th": float(np.percentile(nearby_z, 90)),
-            }
-    return None, {"radius": search_radii[-1], "n_points": 0}
-
-
 def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_ms,
-                           camera_ids, pipeline, output_dir, render_scale=1,
-                           source_path=None, invert_extrinsics=False,
-                           position_offset=None, snap_to_ground=False,
-                           vehicle_height=1.5):
+                           camera_ids, pipeline, output_dir, render_scale=1):
     """Main rendering function for vehicle camera viewpoints."""
     # Load trained model
     print(f"Loading model from {model_path}")
@@ -251,62 +214,6 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
 
     # Load world2lidar transform
     R_w2l, t_w2l = load_world2lidar(transform_json, timestamp_ms)
-
-    # Debug: print scene extent and vehicle position
-    gs_xyz = gaussians.get_xyz.detach().cpu().numpy()
-    print(f"\n[DEBUG] Gaussian cloud center: {gs_xyz.mean(axis=0)}")
-    print(f"[DEBUG] Gaussian cloud extent: min={gs_xyz.min(axis=0)}, max={gs_xyz.max(axis=0)}")
-    T_w2l_4x4 = np.eye(4)
-    T_w2l_4x4[:3, :3] = R_w2l
-    T_w2l_4x4[:3, 3] = t_w2l
-    vehicle_lidar_in_world = np.linalg.inv(T_w2l_4x4)[:3, 3]
-    print(f"[DEBUG] Vehicle LiDAR position in 'world': {vehicle_lidar_in_world}")
-    print(f"[DEBUG] world2lidar translation: {t_w2l}")
-    z_vals = gs_xyz[:, 2]
-    z_pct = np.percentile(z_vals, [5, 10, 25, 50, 75, 90, 95])
-    print(f"[DEBUG] Point cloud Z percentiles (5,10,25,50,75,90,95): {z_pct}")
-
-    # Estimate ground Z at vehicle's XY position
-    ground_z, ground_info = estimate_ground_z(gs_xyz, vehicle_lidar_in_world)
-    if ground_z is not None:
-        z_offset = vehicle_lidar_in_world[2] - ground_z
-        print(f"[DEBUG] Ground estimate (r={ground_info['radius']}m, "
-              f"n={ground_info['n_points']}): "
-              f"peak_z={ground_z:.1f}, Z_90th={ground_info['z_90th']:.1f}, "
-              f"vehicle is {z_offset:.1f}m above peak")
-        if snap_to_ground:
-            # Place vehicle at ground_z + vehicle_height (roof-mounted LiDAR)
-            snap_z_offset = ground_z + vehicle_height - vehicle_lidar_in_world[2]
-            print(f"[SNAP] Auto-adjusting Z by {snap_z_offset:.1f}m "
-                  f"(ground={ground_z:.1f} + height={vehicle_height:.1f} "
-                  f"- current={vehicle_lidar_in_world[2]:.1f})")
-            if position_offset is not None:
-                position_offset = [position_offset[0], position_offset[1],
-                                   position_offset[2] + snap_z_offset]
-            else:
-                position_offset = [0, 0, snap_z_offset]
-    else:
-        print(f"[DEBUG] Not enough nearby points to estimate ground Z")
-        if snap_to_ground:
-            print(f"[SNAP] WARNING: cannot snap - not enough nearby Gaussians")
-
-    # Load COLMAP training cameras for reference
-    colmap_images_txt = os.path.join(
-        source_path or os.path.join(model_path, "..", "..", "data", "car_road"),
-        "sparse", "0", "images.txt"
-    )
-    if os.path.exists(colmap_images_txt):
-        cam_extrinsics = read_extrinsics_text(colmap_images_txt)
-        print(f"\n[DEBUG] Training camera centers (from COLMAP images.txt):")
-        for img_id, extr in sorted(cam_extrinsics.items()):
-            R_w2c = qvec2rotmat(extr.qvec)
-            t_w2c = np.array(extr.tvec)
-            cam_center = -R_w2c.T @ t_w2c
-            print(f"  [{extr.name}] center={cam_center}")
-        print()
-    else:
-        print(f"\n[DEBUG] COLMAP images.txt not found at {colmap_images_txt}")
-        print(f"  Use --source_path to specify the data directory\n")
 
     # Create output directory
     vehicle_render_path = os.path.join(output_dir, "vehicle_renders")
@@ -326,16 +233,6 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
         K, D, R_cam2lidar, t_cam2lidar, resolution = load_vehicle_camera(
             vehicle_calib, cam_id
         )
-
-        # If YAML gives lidar->cam instead of cam->lidar, invert it
-        if invert_extrinsics:
-            T_ext = np.eye(4)
-            T_ext[:3, :3] = R_cam2lidar
-            T_ext[:3, 3] = t_cam2lidar
-            T_ext_inv = np.linalg.inv(T_ext)
-            R_cam2lidar = T_ext_inv[:3, :3]
-            t_cam2lidar = T_ext_inv[:3, 3]
-
         w, h = resolution
 
         # Apply render scale
@@ -360,15 +257,8 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
 
         # Compute camera pose in world coordinates
         R_stored, T_stored = compute_vehicle_cam_pose(
-            R_w2l, t_w2l, R_cam2lidar, t_cam2lidar,
-            position_offset=position_offset
+            R_w2l, t_w2l, R_cam2lidar, t_cam2lidar
         )
-
-        # Debug: print each camera's world position and look direction
-        R_w2c = R_stored.T
-        cam_center = -R_w2c.T @ T_stored
-        look_dir = R_w2c[2, :]  # camera Z axis = look direction in world
-        print(f"  [{cam_name}] center={cam_center}, look_dir={look_dir}")
 
         # Create virtual camera
         cam = create_vehicle_camera(
@@ -402,7 +292,7 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
             alpha, os.path.join(cam_dir, "alpha.png")
         )
 
-        # Save camera info for debugging
+        # Save camera info
         cam_meta = {
             "cam_id": cam_id,
             "cam_name": cam_name,
@@ -436,17 +326,8 @@ if __name__ == "__main__":
                         help="Vehicle camera IDs to render (default: all 7)")
     parser.add_argument("--render_scale", type=int, default=4,
                         help="Downscale factor for rendering resolution (default: 4)")
-    parser.add_argument("--position_offset", type=float, nargs=3, default=[0, 0, 0],
-                        metavar=('X', 'Y', 'Z'),
-                        help="XYZ offset to add to vehicle position in world coords (for debugging)")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Output directory (default: model_path)")
-    parser.add_argument("--invert_extrinsics", action="store_true",
-                        help="Invert vehicle cam2lidar extrinsics (use if YAML gives lidar2cam)")
-    parser.add_argument("--snap_to_ground", action="store_true",
-                        help="Auto-adjust vehicle Z to match road surface from point cloud")
-    parser.add_argument("--vehicle_height", type=float, default=1.5,
-                        help="Vehicle LiDAR height above ground in meters (default: 1.5)")
     parser.add_argument("--quiet", action="store_true")
 
     args = get_combined_args(parser)
@@ -455,7 +336,6 @@ if __name__ == "__main__":
     pipe = pipeline_params.extract(args)
     output_dir = args.output_dir or args.model_path
 
-    offset = args.position_offset if any(v != 0 for v in args.position_offset) else None
     render_vehicle_cameras(
         model_path=args.model_path,
         vehicle_calib=args.vehicle_calib,
@@ -465,9 +345,4 @@ if __name__ == "__main__":
         pipeline=pipe,
         output_dir=output_dir,
         render_scale=args.render_scale,
-        invert_extrinsics=args.invert_extrinsics,
-        position_offset=offset,
-        snap_to_ground=args.snap_to_ground,
-        vehicle_height=args.vehicle_height,
-        source_path=args.source_path if args.source_path else None,
     )
