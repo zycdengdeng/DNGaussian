@@ -41,7 +41,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset, opt)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
-    scene_sprical = RenderScene(dataset, gaussians, spiral=True)
+    try:
+        scene_sprical = RenderScene(dataset, gaussians, spiral=True)
+    except FileNotFoundError:
+        print("Warning: poses_bounds.npy not found, skipping spiral scene (near-range pruning disabled)")
+        scene_sprical = None
     gaussians.training_setup(opt)
     if checkpoint:
         # (model_params, first_iter) = torch.load(checkpoint)
@@ -80,7 +84,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
-        if not viewpoint_sprical_stack:
+        if scene_sprical is not None and not viewpoint_sprical_stack:
             viewpoint_sprical_stack = scene_sprical.getRenderCameras().copy()
 
 
@@ -203,7 +207,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                 #     gaussians.reset_opacity()
 
-            if (iteration - 1) % 25 == 0:
+            if scene_sprical is not None and (iteration - 1) % 25 == 0:
                 viewpoint_sprical_cam = viewpoint_sprical_stack.pop(0)
                 mask_near = None
                 if iteration > 2000:
