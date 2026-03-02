@@ -217,6 +217,17 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
     # Load world2lidar transform
     R_w2l, t_w2l = load_world2lidar(transform_json, timestamp_ms)
 
+    # Debug: print scene extent and vehicle position
+    gs_xyz = gaussians.get_xyz.detach().cpu().numpy()
+    print(f"\n[DEBUG] Gaussian cloud center: {gs_xyz.mean(axis=0)}")
+    print(f"[DEBUG] Gaussian cloud extent: min={gs_xyz.min(axis=0)}, max={gs_xyz.max(axis=0)}")
+    T_w2l_4x4 = np.eye(4)
+    T_w2l_4x4[:3, :3] = R_w2l
+    T_w2l_4x4[:3, 3] = t_w2l
+    vehicle_lidar_in_world = np.linalg.inv(T_w2l_4x4)[:3, 3]
+    print(f"[DEBUG] Vehicle LiDAR position in 'world': {vehicle_lidar_in_world}")
+    print(f"[DEBUG] world2lidar translation: {t_w2l}")
+
     # Create output directory
     vehicle_render_path = os.path.join(output_dir, "vehicle_renders")
     os.makedirs(vehicle_render_path, exist_ok=True)
