@@ -283,6 +283,12 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
             R_w2l, t_w2l, R_cam2lidar, t_cam2lidar
         )
 
+        # Debug: print each camera's world position and look direction
+        R_w2c = R_stored.T
+        cam_center = -R_w2c.T @ T_stored
+        look_dir = R_w2c[2, :]  # camera Z axis = look direction in world
+        print(f"  [{cam_name}] center={cam_center}, look_dir={look_dir}")
+
         # Create virtual camera
         cam = create_vehicle_camera(
             R_stored, T_stored, fovx, fovy, w, h,
