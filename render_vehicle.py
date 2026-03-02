@@ -143,7 +143,8 @@ def compute_undistorted_intrinsics(K, D, cam_id, resolution):
     return new_K
 
 
-def compute_vehicle_cam_pose(R_w2l, t_w2l, R_cam2lidar, t_cam2lidar):
+def compute_vehicle_cam_pose(R_w2l, t_w2l, R_cam2lidar, t_cam2lidar,
+                             position_offset=None):
     """Compute vehicle camera pose in world (COLMAP/roadside) coordinates.
 
     Transform chain: Camera -> LiDAR -> World
@@ -151,6 +152,7 @@ def compute_vehicle_cam_pose(R_w2l, t_w2l, R_cam2lidar, t_cam2lidar):
     Args:
         R_w2l, t_w2l: world-to-lidar transform
         R_cam2lidar, t_cam2lidar: camera-to-lidar extrinsics
+        position_offset: optional [x, y, z] offset in world coordinates
 
     Returns:
         R_stored (3x3), T_stored (3,) for DNGaussian Camera class
@@ -168,6 +170,10 @@ def compute_vehicle_cam_pose(R_w2l, t_w2l, R_cam2lidar, t_cam2lidar):
     # Camera -> World = inv(World->LiDAR) @ Camera->LiDAR
     T_l2w = np.linalg.inv(T_w2l)
     T_c2w = T_l2w @ T_c2l
+
+    # Apply position offset (shift camera center in world coords)
+    if position_offset is not None:
+        T_c2w[:3, 3] += np.array(position_offset)
 
     # World -> Camera
     T_w2c = np.linalg.inv(T_c2w)
@@ -202,7 +208,8 @@ def create_vehicle_camera(R_stored, T_stored, fovx, fovy, width, height, cam_nam
 
 def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_ms,
                            camera_ids, pipeline, output_dir, render_scale=1,
-                           source_path=None, invert_extrinsics=False):
+                           source_path=None, invert_extrinsics=False,
+                           position_offset=None):
     """Main rendering function for vehicle camera viewpoints."""
     # Load trained model
     print(f"Loading model from {model_path}")
@@ -227,6 +234,10 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
     vehicle_lidar_in_world = np.linalg.inv(T_w2l_4x4)[:3, 3]
     print(f"[DEBUG] Vehicle LiDAR position in 'world': {vehicle_lidar_in_world}")
     print(f"[DEBUG] world2lidar translation: {t_w2l}")
+    z_vals = gs_xyz[:, 2]
+    z_pct = np.percentile(z_vals, [5, 10, 25, 50, 75, 90, 95])
+    print(f"[DEBUG] Point cloud Z percentiles (5,10,25,50,75,90,95): {z_pct}")
+    print(f"[DEBUG] Vehicle Z vs ground (Z_10th_pct): offset = {vehicle_lidar_in_world[2] - z_pct[1]:.1f}m")
 
     # Create output directory
     vehicle_render_path = os.path.join(output_dir, "vehicle_renders")
@@ -280,7 +291,8 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
 
         # Compute camera pose in world coordinates
         R_stored, T_stored = compute_vehicle_cam_pose(
-            R_w2l, t_w2l, R_cam2lidar, t_cam2lidar
+            R_w2l, t_w2l, R_cam2lidar, t_cam2lidar,
+            position_offset=position_offset
         )
 
         # Debug: print each camera's world position and look direction
@@ -355,6 +367,9 @@ if __name__ == "__main__":
                         help="Vehicle camera IDs to render (default: all 7)")
     parser.add_argument("--render_scale", type=int, default=4,
                         help="Downscale factor for rendering resolution (default: 4)")
+    parser.add_argument("--position_offset", type=float, nargs=3, default=[0, 0, 0],
+                        metavar=('X', 'Y', 'Z'),
+                        help="XYZ offset to add to vehicle position in world coords (for debugging)")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Output directory (default: model_path)")
     parser.add_argument("--invert_extrinsics", action="store_true",
@@ -367,6 +382,7 @@ if __name__ == "__main__":
     pipe = pipeline_params.extract(args)
     output_dir = args.output_dir or args.model_path
 
+    offset = args.position_offset if any(v != 0 for v in args.position_offset) else None
     render_vehicle_cameras(
         model_path=args.model_path,
         vehicle_calib=args.vehicle_calib,
@@ -377,4 +393,5 @@ if __name__ == "__main__":
         output_dir=output_dir,
         render_scale=args.render_scale,
         invert_extrinsics=args.invert_extrinsics,
+        position_offset=offset,
     )
