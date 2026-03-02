@@ -101,15 +101,17 @@ def load_vehicle_camera(calib_folder, cam_id):
     """
     calib_folder = Path(calib_folder)
 
-    # Intrinsics
-    intr_path = calib_folder / f"camera_{cam_id:02d}_intrinsics.yaml"
+    # Intrinsics: look in camera/ subdirectory first, then root
+    cam_subdir = calib_folder / "camera"
+    base = cam_subdir if cam_subdir.is_dir() else calib_folder
+    intr_path = base / f"camera_{cam_id:02d}_intrinsics.yaml"
     with open(intr_path, 'r') as f:
         intrinsics = yaml.safe_load(f)
     K = np.array(intrinsics['K']).reshape(3, 3)
     D = np.array(intrinsics['D'])
 
     # Extrinsics (camera -> lidar)
-    extr_path = calib_folder / f"camera_{cam_id:02d}_extrinsics.yaml"
+    extr_path = base / f"camera_{cam_id:02d}_extrinsics.yaml"
     with open(extr_path, 'r') as f:
         extrinsics = yaml.safe_load(f)
 
