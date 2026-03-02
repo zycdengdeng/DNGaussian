@@ -317,90 +317,59 @@ def write_ply_ascii(path, xyz, rgb):
 # ============================================================
 def generate_depth_maps(images_dir, depth_maps_dir):
     """
-    Generate dense monocular depth maps using Depth Anything V2.
+    Generate dense monocular depth maps using MiDaS DPT-Large via torch.hub.
     Saves 8-bit grayscale PNGs: higher value = closer (disparity convention).
     This matches DNGaussian's expected format (inverted with 255-x in training).
     """
     try:
         import torch
-        from torchvision import transforms as T
     except ImportError:
-        print("  ERROR: PyTorch not installed. Please install torch and run again.")
-        print("  Alternatively, generate depth maps manually using DPT/Depth Anything")
-        print(f"  and save as: {depth_maps_dir}/depth_<image_stem>.png")
+        print("  ERROR: PyTorch not installed. Run depth generation separately:")
+        print(f"    python scripts/generate_depth_car_road.py "
+              f"--images_dir {images_dir} --output_dir {depth_maps_dir}")
         return
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"  Loading MiDaS DPT_Large (device={device})...")
 
-    # Try loading Depth Anything V2 via torch.hub
-    print(f"  Loading Depth Anything V2 model (device={device})...")
     try:
-        model = torch.hub.load('huggingface/pytorch-transformers', 'model',
-                               'depth-anything/Depth-Anything-V2-Small-hf',
-                               trust_repo=True)
-    except Exception:
-        pass
-
-    # Fallback: try using transformers pipeline
-    model = None
-    pipe = None
-    try:
-        from transformers import pipeline
-        pipe = pipeline(task="depth-estimation",
-                       model="depth-anything/Depth-Anything-V2-Small-hf",
-                       device=device)
-        print("  Loaded via transformers pipeline")
-    except Exception as e1:
-        # Fallback: try DPT
-        try:
-            from transformers import pipeline
-            pipe = pipeline(task="depth-estimation",
-                           model="Intel/dpt-large",
-                           device=device)
-            print("  Loaded DPT-Large via transformers pipeline")
-        except Exception as e2:
-            print(f"  WARNING: Could not load depth estimation model.")
-            print(f"    Error 1 (Depth Anything V2): {e1}")
-            print(f"    Error 2 (DPT): {e2}")
-            print(f"  Please generate depth maps manually:")
-            print(f"    - Use Depth Anything V2 or DPT")
-            print(f"    - Save as 8-bit grayscale PNG (brighter=closer)")
-            print(f"    - Name: depth_<image_stem>.png in {depth_maps_dir}/")
-            return
+        model = torch.hub.load("intel-isl/MiDaS", "DPT_Large", trust_repo=True)
+        model.to(device)
+        model.eval()
+        midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
+        transform = midas_transforms.dpt_transform
+    except Exception as e:
+        print(f"  ERROR: Failed to load MiDaS: {e}")
+        print(f"  Run depth generation separately with:")
+        print(f"    python scripts/generate_depth_car_road.py "
+              f"--images_dir {images_dir} --output_dir {depth_maps_dir}")
+        return
 
     img_files = sorted([f for f in os.listdir(images_dir)
                        if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
 
     for img_file in img_files:
         img_path = os.path.join(images_dir, img_file)
-        img = Image.open(img_path)
+        img = cv2.imread(img_path)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        orig_h, orig_w = img.shape[:2]
 
-        # Run depth estimation
-        result = pipe(img)
-        depth = result['depth']  # PIL Image (relative depth)
+        input_batch = transform(img_rgb).to(device)
+        with torch.no_grad():
+            prediction = model(input_batch)
+            prediction = torch.nn.functional.interpolate(
+                prediction.unsqueeze(1), size=(orig_h, orig_w),
+                mode="bicubic", align_corners=False,
+            ).squeeze()
 
-        # Convert to numpy and normalize to 8-bit
-        depth_np = np.array(depth, dtype=np.float32)
-
-        # Normalize: higher value = closer (disparity convention)
-        # The pipeline output may vary: some give depth (farther=higher),
-        # some give disparity (closer=higher). We need closer=higher.
-        # Check if this looks like depth or disparity by checking correlation
-        # with distance from image center (for overhead cameras, center is farther)
+        depth_np = prediction.cpu().numpy()
         d_min, d_max = depth_np.min(), depth_np.max()
         if d_max > d_min:
             depth_norm = (depth_np - d_min) / (d_max - d_min)
         else:
             depth_norm = np.zeros_like(depth_np)
 
-        # Resize to match original image size if needed
-        orig_h, orig_w = np.array(Image.open(img_path)).shape[:2]
-        if depth_norm.shape != (orig_h, orig_w):
-            depth_norm = cv2.resize(depth_norm, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-
-        # Save as uint8 (0-255)
         depth_png = (depth_norm * 255).astype(np.uint8)
-
         stem = os.path.splitext(img_file)[0]
         out_path = os.path.join(depth_maps_dir, f'depth_{stem}.png')
         cv2.imwrite(out_path, depth_png)
