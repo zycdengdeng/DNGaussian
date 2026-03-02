@@ -10,6 +10,8 @@ nvcc_flags = [
 
 if os.name == "posix":
     c_flags = ['-O3', '-std=c++14']
+    os.environ['CC'] = 'gcc-11'
+    os.environ['CXX'] = 'g++-11'
 elif os.name == "nt":
     c_flags = ['/O2', '/std:c++17']
 

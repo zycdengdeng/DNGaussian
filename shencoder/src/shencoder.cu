@@ -5,7 +5,7 @@
 #include <cuda_runtime.h>
 
 #include <ATen/cuda/CUDAContext.h>
-#include <torch/torch.h>
+#include <torch/types.h>
 
 #include <algorithm>
 #include <stdexcept>

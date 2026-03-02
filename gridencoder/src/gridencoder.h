@@ -2,7 +2,7 @@
 #define _HASH_ENCODE_H
 
 #include <stdint.h>
-#include <torch/torch.h>
+#include <torch/types.h>
 
 // inputs: [B, D], float, in [0, 1]
 // embeddings: [sO, C], float
