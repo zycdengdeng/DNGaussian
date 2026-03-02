@@ -202,7 +202,7 @@ def create_vehicle_camera(R_stored, T_stored, fovx, fovy, width, height, cam_nam
 
 def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_ms,
                            camera_ids, pipeline, output_dir, render_scale=1,
-                           source_path=None):
+                           source_path=None, invert_extrinsics=False):
     """Main rendering function for vehicle camera viewpoints."""
     # Load trained model
     print(f"Loading model from {model_path}")
@@ -246,6 +246,16 @@ def render_vehicle_cameras(model_path, vehicle_calib, transform_json, timestamp_
         K, D, R_cam2lidar, t_cam2lidar, resolution = load_vehicle_camera(
             vehicle_calib, cam_id
         )
+
+        # If YAML gives lidar->cam instead of cam->lidar, invert it
+        if invert_extrinsics:
+            T_ext = np.eye(4)
+            T_ext[:3, :3] = R_cam2lidar
+            T_ext[:3, 3] = t_cam2lidar
+            T_ext_inv = np.linalg.inv(T_ext)
+            R_cam2lidar = T_ext_inv[:3, :3]
+            t_cam2lidar = T_ext_inv[:3, 3]
+
         w, h = resolution
 
         # Apply render scale
@@ -341,6 +351,8 @@ if __name__ == "__main__":
                         help="Downscale factor for rendering resolution (default: 4)")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Output directory (default: model_path)")
+    parser.add_argument("--invert_extrinsics", action="store_true",
+                        help="Invert vehicle cam2lidar extrinsics (use if YAML gives lidar2cam)")
     parser.add_argument("--quiet", action="store_true")
 
     args = get_combined_args(parser)
@@ -358,4 +370,5 @@ if __name__ == "__main__":
         pipeline=pipe,
         output_dir=output_dir,
         render_scale=args.render_scale,
+        invert_extrinsics=args.invert_extrinsics,
     )
